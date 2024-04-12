@@ -1,0 +1,264 @@
+---
+title: "Smartphones Clustering"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: load-packages
+#| include: false
+
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(fastDummies)
+library(tidyr)
+```
+
+## Loading the dataset
+
+```{r}
+smartphones <- read_csv("smartphones.csv", show_col_types = FALSE)
+```
+
+```{r}
+colSums(is.na(smartphones))
+```
+
+```{r}
+summary(smartphones)
+```
+
+```{r}
+colnames(smartphones)
+```
+
+## Preprocessing
+
+```{r}
+clean_data <- smartphones %>%
+  select(brand_name, model, price, processor_speed, num_cores, battery_capacity, `5G_or_not`, fast_charging_available, internal_memory, ram_capacity) %>%
+  mutate(
+    battery_capacity = case_when(
+      grepl("Apple iPhone 12", model) & battery_capacity == 0 ~ 2815,
+      grepl("Apple iPhone 12 (128GB)", model) & battery_capacity == 0 ~ 2815,
+      grepl("Apple iPhone 12 Mini", model) & battery_capacity == 0 ~ 2227,
+      grepl("Apple iPhone 12 Mini (128GB)", model) & battery_capacity == 0 ~ 2227,
+      grepl("Apple iPhone 12 Mini (256GB)", model) & battery_capacity == 0 ~ 2227,
+      grepl("Apple iPhone 12 Pro (256GB)", model) & battery_capacity == 0 ~ 2815,
+      grepl("Apple iPhone 12 Pro (512GB)", model) & battery_capacity == 0 ~ 2815,
+      grepl("Apple iPhone 15 Pro", model) & battery_capacity == 0 ~ 3274,
+      grepl("Apple iPhone SE 3 2022", model) & battery_capacity == 0 ~ 2018,
+      grepl("Apple iPhone SE 4", model) & battery_capacity == 0 ~ 3279,
+      TRUE ~ battery_capacity
+    ),
+    processor_performance = processor_speed * num_cores,
+    price = price * 0.011  #converting from indian rupee to euro
+  )
+```
+
+```{r}
+colSums(is.na(clean_data))
+```
+
+```{r}
+clean_data <- na.omit(clean_data)
+clean_data <- subset(clean_data, processor_speed != 0.00)
+```
+
+```{r}
+clean_data <- clean_data[, -c(4,5)]
+```
+
+#### Distribution of numeric columns
+
+```{r}
+columns_to_plot <- c("battery_capacity", "internal_memory", "ram_capacity", "processor_performance", "price")
+
+# Looping through each column name and create a plot
+plots <- lapply(columns_to_plot, function(column_name) {
+  ggplot(clean_data, aes(x = .data[[column_name]])) + 
+    geom_histogram(bins = 30, fill = "lightblue", color = "black") + 
+    labs(title = paste("Distribution of", column_name), x = column_name, y = "Frequency") +
+    theme_minimal()
+})
+
+# Printing the plots
+walk(plots, print)
+```
+
+```{r}
+summary(clean_data)
+```
+
+### **Identifying Highly Correlated Features**
+
+Performing a correlation analysis and potentially removing highly correlated features from the data set in R: (correlation coefficient above a certain threshold, in this case, 0.8).
+
+```{r}
+data_numeric <- clean_data %>% select_if(is.numeric)
+cor_matrix <- cor(data_numeric)
+print(cor_matrix)
+```
+
+## Ready for clustering
+
+The presence of outliers suggests that there may be phones with specifications that are significantly different from the general population of phones in the dataset.
+
+```{r}
+# Removing non-numeric columns 
+features <- clean_data[, !(names(clean_data) %in% c("brand_name","model", "price"))]
+```
+
+```{r}
+# Standardizing
+features$battery_capacity <- scale(features$battery_capacity)
+features$internal_memory <- scale(features$internal_memory)
+features$ram_capacity <- scale(features$ram_capacity)
+features$processor_performance <- scale(features$processor_performance)
+```
+
+```{r}
+head(features)
+```
+
+Performing the **elbow method** to determine the optimal number of clusters:
+
+```{r}
+
+set.seed(7)
+wss <- numeric() # Initializing vector to store WSS for each k
+for (k in 1:10) {
+  km <- kmeans(features, centers = k, nstart = 25)
+  wss[k] <- km$tot.withinss
+}
+```
+
+```{r}
+
+# Plotting the elbow curve
+plot(1:10, wss, type = "b", pch = 19, frame = FALSE, 
+     xlab = "Number of clusters K", 
+     ylab = "Total within-cluster sum of squares")
+
+```
+
+The elbow plot above is typical of what might be seen in many datasets. There is not a clear and sharp "elbow" that would indicate the optimal number of clusters. The curve is smooth, and the total within-cluster sum of squares decreases at a decreasing rate as the number of clusters increases.
+
+Performing the clustering using kmeans algorithm:
+
+```{r}
+set.seed(7) # For reproducibility
+km_result <- kmeans(features, centers = 3, nstart = 10)
+
+# Add the cluster assignment back to the original data
+features$kcluster <- km_result$cluster
+
+# Inspect the first few rows of the data to see the cluster assignment
+head(features)
+```
+
+```{r}
+features$`5G_or_not` <- as.factor(features$`5G_or_not`)
+features$fast_charging_available <- as.factor(features$fast_charging_available)
+
+numerical_columns <- c("battery_capacity", "internal_memory", "ram_capacity", "processor_performance")  
+features[numerical_columns] <- lapply(features[numerical_columns], as.numeric)
+
+```
+
+```{r}
+library(cluster)
+```
+
+```{r}
+
+dissimilarity_matrix <- daisy(features, metric = "gower")
+
+silhouettes <- silhouette(features$kcluster, dissimilarity_matrix)
+silhouette_summary <- summary(silhouettes)
+plot(silhouettes, col = 1:5, border = NA)
+
+```
+
+This silhouette plot is a graphical representation of how well each object lies within its cluster. It is a measure of how similar an object is to its own cluster (cohesion) compared to other clusters (separation). The silhouette width ranges from -1 to 1, where:
+
+-   A high silhouette width (close to 1) indicates that the object is well matched to its own cluster and poorly matched to neighboring clusters.
+
+-   If most objects have a high value, then the clustering configuration is appropriate.
+
+-   If many points have a low or negative value, then the clustering configuration may have too many or too few clusters.
+
+-   The average silhouette width for the entire dataset is 0.56, which suggests a reasonably good structure
+
+```{r}
+if (nrow(clean_data) == nrow(features)) {
+  # Adding the new cluster column to clean_data (that contains model, brand and price)
+  clean_data$kcluster <- features$kcluster
+} else {
+  stop("The number of rows in the datasets do not match.")
+}
+
+```
+
+```{r}
+
+# Plotting price vs cluster with a scatter plot
+ggplot(clean_data, aes(x = factor(kcluster), y = price)) +
+  geom_jitter(width = 0.2, alpha = 0.5) + # geom_jitter to avoid overplotting
+  labs(x = "Cluster", y = "Price", title = "Price vs Cluster Assignment") +
+  theme_minimal()
+
+```
+
+```{r}
+cluster_averages <- clean_data %>%
+  group_by(kcluster) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))
+
+# Printing the averages for each cluster
+print(cluster_averages)
+```
+
+```{r}
+
+
+centroids <- as.data.frame(km_result$centers)
+print(centroids)
+
+# Calculating the range for each feature across centroids
+feature_importance <- apply(centroids, 2, function(x) max(x) - min(x))
+
+# Sorting features by importance
+sorted_feature_importance <- sort(feature_importance, decreasing = TRUE)
+print(sorted_feature_importance)
+
+```
+
+```{r}
+brand_dominance <- clean_data %>%
+  group_by(kcluster, brand_name) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  arrange(kcluster, desc(count))
+
+# Now, for each cluster, calculating the percentage of each brand
+brand_dominance <- brand_dominance %>%
+  group_by(kcluster) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+# Displaying the top brands in each cluster by percentage
+print(brand_dominance)
+```
+
+```{r}
+ggplot(brand_dominance, aes(x = factor(kcluster), y = percentage, fill = brand_name)) +
+  geom_bar(stat = "identity", position = position_stack(reverse = TRUE)) +
+  labs(x = "Cluster", y = "Percentage", fill = "Brand Name") +
+  theme_minimal() +
+  coord_flip() + # This makes it easier to read the brand names
+  ggtitle("Brand Dominance in Smartphone Clusters")
+```
+
+```{r}
+View(clean_data)
+```
